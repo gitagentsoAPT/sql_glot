@@ -1,0 +1,59 @@
+:root {
+  color: #172033;
+  background: #f4f6f9;
+  font-family: Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body { margin: 0; padding: 2rem 1rem; }
+
+.converter {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 2rem;
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 2px 12px #1720331a;
+}
+
+h1 { margin: 0; }
+.intro { margin: .5rem 0 1.5rem; color: #536174; }
+
+label { display: block; font-weight: 600; margin-top: 1.25rem; }
+
+.dialects { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; }
+.dialects label { margin-top: 0; }
+
+select, textarea, button {
+  font: inherit;
+}
+
+select, textarea {
+  display: block;
+  width: 100%;
+  margin-top: .45rem;
+  padding: .7rem;
+  border: 1px solid #b6c0ce;
+  border-radius: 5px;
+}
+
+textarea { font-family: ui-monospace, monospace; resize: vertical; }
+
+button {
+  margin-top: 1.25rem;
+  padding: .7rem 1.1rem;
+  color: #fff;
+  background: #1769aa;
+  border: 0;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+button:hover { background: #0f538a; }
+.error { padding: .75rem; color: #9f1d1d; background: #fff0f0; border-radius: 5px; }
+
+@media (max-width: 560px) {
+  .converter { padding: 1.25rem; }
+  .dialects { grid-template-columns: 1fr; }
+}

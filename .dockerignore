@@ -1,0 +1,17 @@
+.git
+.gitignore
+.agents
+.codex
+.venv
+venv
+env
+__pycache__
+*.py[cod]
+*.pyc
+.pytest_cache
+.coverage
+htmlcov
+tests
+README.md
+Dockerfile
+.dockerignore

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>SQL Dialect Converter</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  </head>
+  <body>
+    <main class="converter">
+      <h1>SQL Dialect Converter</h1>
+      <p class="intro">Convert SQL between Oracle, MySQL, and PostgreSQL.</p>
+
+      <form method="post" novalidate>
+        <div class="dialects">
+          <label for="source_dialect">
+            Source dialect
+            <select id="source_dialect" name="source_dialect">
+              {% for code, label in dialects.items() %}
+              <option value="{{ code }}" {% if code == source_dialect %}selected{% endif %}>{{ label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+
+          <label for="target_dialect">
+            Target dialect
+            <select id="target_dialect" name="target_dialect">
+              {% for code, label in dialects.items() %}
+              <option value="{{ code }}" {% if code == target_dialect %}selected{% endif %}>{{ label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+        </div>
+
+        <label for="source_sql">
+          SQL query
+          <textarea id="source_sql" name="source_sql" rows="10" placeholder="SELECT * FROM employees;" required>{{ source_sql }}</textarea>
+        </label>
+
+        <button type="submit">Convert SQL</button>
+      </form>
+
+      {% if error %}
+      <p class="error" role="alert">{{ error }}</p>
+      {% endif %}
+
+      <label for="converted_sql">
+        Converted SQL
+        <textarea id="converted_sql" rows="10" readonly placeholder="Converted query will appear here.">{{ converted_sql }}</textarea>
+      </label>
+    </main>
+  </body>
+</html>
