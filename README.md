@@ -3,6 +3,27 @@
 A small Flask application that converts a SQL query between Oracle, MySQL, and
 PostgreSQL using [sqlglot](https://github.com/tobymao/sqlglot).
 
+## Transpilation engine
+
+`SQLTranspilationEngine` in `transpiler_wrapper.py` provides the typed,
+object-oriented interface used by both the browser UI and JSON API:
+
+```python
+from transpiler_wrapper import SQLTranspilationEngine
+
+engine = SQLTranspilationEngine()
+result = engine.transpile_query(
+    "SELECT NVL(name, 'unknown') FROM employees",
+    "oracle",
+    "mysql",
+)
+
+if result["success"]:
+    print(result["converted_sql"])
+else:
+    print(result["error_message"])
+```
+
 ## Run locally
 
 1. Install Python 3.10 or newer. Check it with:

@@ -1,6 +1,7 @@
 import unittest
 
 from app import app
+from transpiler_wrapper import SQLTranspilationEngine
 
 
 class ConverterTestCase(unittest.TestCase):
@@ -158,6 +159,52 @@ class ConverterTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 422)
         self.assertIn("Unable to convert this SQL", response.json["error"])
+
+
+class SQLTranspilationEngineTestCase(unittest.TestCase):
+    def setUp(self):
+        self.engine = SQLTranspilationEngine()
+
+    def test_engine_defines_supported_dialects(self):
+        self.assertEqual(
+            self.engine.supported_dialects,
+            frozenset({"mysql", "postgres", "oracle"}),
+        )
+
+    def test_engine_returns_successful_conversion_result(self):
+        result = self.engine.transpile_query(
+            "SELECT NVL(name, 'unknown') FROM employees", "oracle", "mysql"
+        )
+
+        self.assertTrue(result["success"])
+        self.assertIn("COALESCE(name, 'unknown')", result["converted_sql"])
+        self.assertIsNone(result["error_message"])
+        self.assertIsNone(result["error_category"])
+
+    def test_engine_returns_validation_result_for_blank_query(self):
+        result = self.engine.transpile_query("   ", "oracle", "mysql")
+
+        self.assertFalse(result["success"])
+        self.assertIsNone(result["converted_sql"])
+        self.assertEqual(result["error_message"], "Enter a SQL query to convert.")
+        self.assertEqual(result["error_category"], "validation")
+
+    def test_engine_returns_validation_result_for_invalid_dialect(self):
+        result = self.engine.transpile_query("SELECT 1", "sqlite", "mysql")
+
+        self.assertFalse(result["success"])
+        self.assertEqual(
+            result["error_message"], "Choose a supported source and target dialect."
+        )
+        self.assertEqual(result["error_category"], "validation")
+
+    def test_engine_returns_conversion_result_for_invalid_sql(self):
+        result = self.engine.transpile_query("SELECT * FROM (", "mysql", "oracle")
+
+        self.assertFalse(result["success"])
+        self.assertIsNone(result["converted_sql"])
+        self.assertIn("Unable to convert this SQL", result["error_message"])
+        self.assertEqual(result["error_category"], "conversion")
 
 
 if __name__ == "__main__":

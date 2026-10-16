@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from flask import Flask, jsonify, render_template, request
-from sqlglot import transpile
-from sqlglot.errors import ErrorLevel, SqlglotError
+
+from transpiler_wrapper import SQLTranspilationEngine
 
 
 app = Flask(__name__)
@@ -13,28 +13,7 @@ DIALECTS = {
     "postgres": "PostgreSQL",
 }
 
-
-def convert_sql(source_sql: str, source_dialect: str, target_dialect: str) -> str:
-    if not isinstance(source_sql, str):
-        raise ValueError("source_sql must be a string.")
-    if not isinstance(source_dialect, str) or not isinstance(target_dialect, str):
-        raise ValueError("Source and target dialects must be strings.")
-
-    source_sql = source_sql.strip()
-    if not source_sql:
-        raise ValueError("Enter a SQL query to convert.")
-    if source_dialect not in DIALECTS or target_dialect not in DIALECTS:
-        raise ValueError("Choose a supported source and target dialect.")
-
-    return "\n\n".join(
-        transpile(
-            source_sql,
-            read=source_dialect,
-            write=target_dialect,
-            error_level=ErrorLevel.RAISE,
-            pretty=True,
-        )
-    )
+transpilation_engine = SQLTranspilationEngine()
 
 
 @app.route("/", methods=["GET", "POST"])
@@ -50,12 +29,13 @@ def index():
         source_dialect = request.form.get("source_dialect", source_dialect)
         target_dialect = request.form.get("target_dialect", target_dialect)
 
-        try:
-            converted_sql = convert_sql(source_sql, source_dialect, target_dialect)
-        except ValueError as exc:
-            error = str(exc)
-        except SqlglotError as exc:
-            error = f"Unable to convert this SQL: {exc}"
+        result = transpilation_engine.transpile_query(
+            source_sql, source_dialect, target_dialect
+        )
+        if result["success"]:
+            converted_sql = result["converted_sql"] or ""
+        else:
+            error = result["error_message"] or "Unable to convert this SQL."
 
     return render_template(
         "index.html",
@@ -75,19 +55,18 @@ def api_convert():
     if not isinstance(payload, dict):
         return jsonify(error="Request body must be a JSON object."), 400
 
-    try:
-        converted_sql = convert_sql(
-            payload.get("source_sql"),
-            payload.get("source_dialect"),
-            payload.get("target_dialect"),
-        )
-    except ValueError as exc:
-        return jsonify(error=str(exc)), 400
-    except SqlglotError as exc:
-        return jsonify(error=f"Unable to convert this SQL: {exc}"), 422
+    result = transpilation_engine.transpile_query(
+        payload.get("source_sql"),
+        payload.get("source_dialect"),
+        payload.get("target_dialect"),
+    )
+
+    if not result["success"]:
+        status_code = 400 if result["error_category"] == "validation" else 422
+        return jsonify(error=result["error_message"]), status_code
 
     return jsonify(
-        converted_sql=converted_sql,
+        converted_sql=result["converted_sql"],
         source_dialect=payload["source_dialect"],
         target_dialect=payload["target_dialect"],
     )
