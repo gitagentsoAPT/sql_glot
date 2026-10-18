@@ -62,13 +62,56 @@ def api_convert():
     )
 
     if not result["success"]:
-        status_code = 400 if result["error_category"] == "validation" else 422
-        return jsonify(error=result["error_message"]), status_code
+        if result["error_category"] == "validation":
+            status_code = 400
+        elif result["error_category"] == "internal":
+            status_code = 500
+        else:
+            status_code = 422
+        return jsonify(
+            error=result["error_message"],
+            error_stage=result["error_stage"],
+        ), status_code
 
     return jsonify(
         converted_sql=result["converted_sql"],
         source_dialect=payload["source_dialect"],
         target_dialect=payload["target_dialect"],
+    )
+
+
+@app.post("/api/convert/debug")
+def api_convert_debug():
+    """Return the final SQL together with the staged pipeline snapshots."""
+    payload = request.get_json(silent=True)
+
+    if not isinstance(payload, dict):
+        return jsonify(error="Request body must be a JSON object."), 400
+
+    result = transpilation_engine.transpile_query(
+        payload.get("source_sql"),
+        payload.get("source_dialect"),
+        payload.get("target_dialect"),
+        include_trace=True,
+    )
+
+    if not result["success"]:
+        if result["error_category"] == "validation":
+            status_code = 400
+        elif result["error_category"] == "internal":
+            status_code = 500
+        else:
+            status_code = 422
+        return jsonify(
+            error=result["error_message"],
+            error_stage=result["error_stage"],
+        ), status_code
+
+    return jsonify(
+        converted_sql=result["converted_sql"],
+        source_dialect=payload["source_dialect"],
+        target_dialect=payload["target_dialect"],
+        trace=result["trace"],
     )
 
 

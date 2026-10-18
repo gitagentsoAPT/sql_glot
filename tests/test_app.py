@@ -1,6 +1,9 @@
 import unittest
 
+import sqlglot
+
 from app import app
+from transpilation_pipeline import TranspilationPipeline
 from transpiler_wrapper import SQLTranspilationEngine
 
 
@@ -160,6 +163,34 @@ class ConverterTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 422)
         self.assertIn("Unable to convert this SQL", response.json["error"])
 
+    def test_api_debug_returns_pipeline_trace(self):
+        response = self.client.post(
+            "/api/convert/debug",
+            json={
+                "source_sql": "SELECT NVL(name, 'unknown') FROM employees",
+                "source_dialect": "oracle",
+                "target_dialect": "mysql",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("parsed_ast", response.json["trace"])
+        self.assertIn("optimized_ast", response.json["trace"])
+        self.assertIn("COALESCE(name, 'unknown')", response.json["converted_sql"])
+
+    def test_debug_api_rejects_invalid_sql_with_stage(self):
+        response = self.client.post(
+            "/api/convert/debug",
+            json={
+                "source_sql": "SELECT * FROM (",
+                "source_dialect": "mysql",
+                "target_dialect": "oracle",
+            },
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json["error_stage"], "parse")
+
 
 class SQLTranspilationEngineTestCase(unittest.TestCase):
     def setUp(self):
@@ -205,6 +236,35 @@ class SQLTranspilationEngineTestCase(unittest.TestCase):
         self.assertIsNone(result["converted_sql"])
         self.assertIn("Unable to convert this SQL", result["error_message"])
         self.assertEqual(result["error_category"], "conversion")
+        self.assertEqual(result["error_stage"], "parse")
+
+    def test_engine_returns_trace_for_multiple_statements(self):
+        result = self.engine.transpile_query(
+            "SELECT 1; SELECT 2", "mysql", "postgres", include_trace=True
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(len(result["trace"]["parsed_ast"]), 2)
+        self.assertEqual(result["trace"]["parsed_ast"], result["trace"]["optimized_ast"])
+        self.assertIn("SELECT\n  1", result["converted_sql"])
+
+
+class TranspilationPipelineTestCase(unittest.TestCase):
+    def test_pipeline_exposes_each_stage(self):
+        pipeline = TranspilationPipeline()
+        parsed = pipeline.parse("SELECT 1", "mysql")
+        ast = pipeline.build_ast(parsed)
+        optimized = pipeline.optimize(ast, "postgres")
+        generated = pipeline.generate(optimized, "postgres")
+
+        self.assertEqual(len(parsed.statements), 1)
+        self.assertEqual(ast.statements, parsed.statements)
+        self.assertEqual(optimized.statements[0].sql(), "SELECT 1")
+        self.assertEqual(generated, "SELECT\n  1")
+
+    def test_application_uses_vendored_sqlglot(self):
+        self.assertTrue(sqlglot.__file__.startswith(app.root_path))
+        self.assertEqual(sqlglot.__version__, "26.3.0")
 
 
 if __name__ == "__main__":
