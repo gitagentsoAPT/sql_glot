@@ -6,7 +6,30 @@ PostgreSQL using [sqlglot](https://github.com/tobymao/sqlglot).
 ## Transpilation engine
 
 `SQLTranspilationEngine` in `transpiler_wrapper.py` provides the typed,
-object-oriented interface used by both the browser UI and JSON API:
+object-oriented interface used by both the browser UI and JSON API. The
+student-owned `TranspilationPipeline` makes the compiler stages explicit:
+
+```text
+source SQL + source dialect
+          |
+        parse       (SQLGlot parser)
+          |
+        AST         (student-owned stage contract)
+          |
+        optimize   (SQLGlot optimizer boundary)
+          |
+        generate   (SQLGlot dialect generator)
+          |
+      target SQL
+```
+
+The complete SQLGlot 26.3.0 runtime is vendored in `sqlglot/`. See
+`SQLGLOT_VENDOR.md` for its provenance and license. The application-specific
+pipeline is deliberately outside that package so later coursework can replace
+one stage at a time.
+
+`SQLTranspilationEngine` provides the typed interface used by both the browser
+UI and JSON API:
 
 ```python
 from transpiler_wrapper import SQLTranspilationEngine
@@ -23,6 +46,10 @@ if result["success"]:
 else:
     print(result["error_message"])
 ```
+
+For teaching and inspection, `POST /api/convert/debug` accepts the same JSON
+body and returns `trace.parsed_ast`, `trace.optimized_ast`, and the generated
+SQL. The normal `/api/convert` response remains unchanged.
 
 ## Run locally
 
