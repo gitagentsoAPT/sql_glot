@@ -52,6 +52,7 @@ button {
 
 button:hover { background: #0f538a; }
 .error { padding: .75rem; color: #9f1d1d; background: #fff0f0; border-radius: 5px; }
+.warning { padding: .75rem; color: #765400; background: #fff8db; border-radius: 5px; }
 
 @media (max-width: 560px) {
   .converter { padding: 1.25rem; }

@@ -23,6 +23,7 @@ def index():
     target_dialect = "mysql"
     converted_sql = ""
     error = ""
+    warning = ""
 
     if request.method == "POST":
         source_sql = request.form.get("source_sql", "").strip()
@@ -34,6 +35,7 @@ def index():
         )
         if result["success"]:
             converted_sql = result["converted_sql"] or ""
+            warning = result["persistence_warning"] or ""
         else:
             error = result["error_message"] or "Unable to convert this SQL."
 
@@ -45,6 +47,7 @@ def index():
         target_dialect=target_dialect,
         converted_sql=converted_sql,
         error=error,
+        warning=warning,
     )
 
 
@@ -77,6 +80,11 @@ def api_convert():
         converted_sql=result["converted_sql"],
         source_dialect=payload["source_dialect"],
         target_dialect=payload["target_dialect"],
+        **(
+            {"warning": result["persistence_warning"]}
+            if result["persistence_warning"]
+            else {}
+        ),
     )
 
 
@@ -112,6 +120,11 @@ def api_convert_debug():
         source_dialect=payload["source_dialect"],
         target_dialect=payload["target_dialect"],
         trace=result["trace"],
+        **(
+            {"warning": result["persistence_warning"]}
+            if result["persistence_warning"]
+            else {}
+        ),
     )
 
 

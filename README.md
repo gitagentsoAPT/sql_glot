@@ -51,6 +51,28 @@ For teaching and inspection, `POST /api/convert/debug` accepts the same JSON
 body and returns `trace.parsed_ast`, `trace.optimized_ast`, and the generated
 SQL. The normal `/api/convert` response remains unchanged.
 
+## Audit database
+
+The project can persist every conversion trace in MySQL 8. The schema follows
+the report's four entities:
+
+```text
+DIALECT ──< AST_SNAPSHOT ──< TRANSFORMATION >── OPTIMIZATION_RULE
+```
+
+The implementation extends the report model with a `request_id`, explicit
+source and target dialect references, snapshot stages, and before/after
+snapshot references for each transformation. ASTs are stored as JSON, while
+the original and generated SQL are retained as text.
+
+The schema and seed data are defined in `database/schema.sql`. The initial
+student-owned rules are `constant_comparison_folding` and
+`boolean_identity_simplification`.
+
+Local runs leave persistence disabled unless `AUDIT_DB_ENABLED=true` is set.
+When persistence is enabled but MySQL is unavailable, conversion still
+succeeds and the API/UI reports a warning.
+
 ## Run locally
 
 1. Install Python 3.10 or newer. Check it with:
@@ -165,6 +187,23 @@ View its logs with `docker logs sql-dialect-converter`, stop it with
 `docker stop sql-dialect-converter`, and remove it with
 `docker rm sql-dialect-converter`.
 
+## Run with Docker Compose and MySQL
+
+Docker Compose starts the application and its MySQL audit database together:
+
+```bash
+docker compose up --build
+```
+
+Open <http://localhost:5000>. Stop the services with:
+
+```bash
+docker compose down
+```
+
+The MySQL data is stored in the `mysql-data` named volume. To remove the data
+as well, use `docker compose down -v`.
+
 ## Run with Kubernetes and Minikube
 
 This deployment uses a local Minikube cluster with the Docker driver and a
@@ -195,6 +234,7 @@ terminal before continuing.
    ```bash
    kubectl apply -f k8s/sql-dialect-converter.yaml
    kubectl rollout status deployment/sql-dialect-converter
+   kubectl rollout status deployment/sql-dialect-mysql
    ```
 
 5. Open the application in a browser:
@@ -215,5 +255,6 @@ Useful Kubernetes commands:
 kubectl get pods
 kubectl get services
 kubectl logs deployment/sql-dialect-converter
+kubectl logs deployment/sql-dialect-mysql
 kubectl delete -f k8s/sql-dialect-converter.yaml
 ```

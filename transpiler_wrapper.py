@@ -6,6 +6,7 @@ from typing import Literal, TypedDict
 
 from sqlglot.errors import ParseError, SqlglotError, UnsupportedError
 
+from persistence import AuditPersistenceError, MySQLAuditStore
 from transpilation_pipeline import (
     TranspilationPipeline,
     TranspilationPipelineError,
@@ -24,15 +25,17 @@ class SQLTranspilationResult(TypedDict):
     error_category: ErrorCategory | None
     error_stage: str | None
     trace: dict[str, object] | None
+    persistence_warning: str | None
 
 
 class SQLTranspilationEngine:
     """Validates and converts SQL among the application's supported dialects."""
 
-    def __init__(self) -> None:
+    def __init__(self, audit_store: MySQLAuditStore | None = None) -> None:
         """Configure the sqlglot dialect identifiers accepted by this engine."""
         self.supported_dialects = frozenset({"mysql", "postgres", "oracle"})
         self.pipeline = TranspilationPipeline()
+        self.audit_store = audit_store or MySQLAuditStore.from_env()
 
     def transpile_query(
         self,
@@ -53,6 +56,7 @@ class SQLTranspilationEngine:
                 "error_category": "validation",
                 "error_stage": None,
                 "trace": None,
+                "persistence_warning": None,
             }
 
         try:
@@ -67,6 +71,7 @@ class SQLTranspilationEngine:
                 "error_category": "conversion",
                 "error_stage": exc.stage,
                 "trace": None,
+                "persistence_warning": None,
             }
         except (ParseError, UnsupportedError, SqlglotError, ValueError) as exc:
             return {
@@ -76,6 +81,7 @@ class SQLTranspilationEngine:
                 "error_category": "conversion",
                 "error_stage": None,
                 "trace": None,
+                "persistence_warning": None,
             }
         except Exception:
             return {
@@ -85,7 +91,14 @@ class SQLTranspilationEngine:
                 "error_category": "internal",
                 "error_stage": None,
                 "trace": None,
+                "persistence_warning": None,
             }
+
+        persistence_warning = None
+        try:
+            self.audit_store.persist(trace)
+        except AuditPersistenceError as exc:
+            persistence_warning = f"Conversion succeeded, but audit persistence failed: {exc}"
 
         return {
             "success": True,
@@ -94,6 +107,7 @@ class SQLTranspilationEngine:
             "error_category": None,
             "error_stage": None,
             "trace": trace.as_dict() if include_trace else None,
+            "persistence_warning": persistence_warning,
         }
 
     def _validate_request(

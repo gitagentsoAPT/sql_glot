@@ -1,0 +1,1049 @@
+diff --git a/Dockerfile b/Dockerfile
+index a4dc9ad1f3cee35d813f96aa4d7900ee0901519b..69f877b16c3592f4779c6258293ade5fb79574a1 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -11,6 +11,7 @@ RUN pip install --no-cache-dir -r requirements.txt
+ COPY app.py .
+ COPY transpiler_wrapper.py .
+ COPY transpilation_pipeline.py .
++COPY database ./database
+ COPY sqlglot ./sqlglot
+ COPY templates ./templates
+ COPY static ./static
+diff --git a/README.md b/README.md
+index 2335ad53682a88a42da97db29bffd13d819f1c17..46a00c81d6ba08e31d8640edd340404066926d3e 100644
+--- a/README.md
++++ b/README.md
+@@ -51,6 +51,28 @@ For teaching and inspection, `POST /api/convert/debug` accepts the same JSON
+ body and returns `trace.parsed_ast`, `trace.optimized_ast`, and the generated
+ SQL. The normal `/api/convert` response remains unchanged.
+ 
++## Audit database
++
++The project can persist every conversion trace in MySQL 8. The schema follows
++the report's four entities:
++
++```text
++DIALECT ──< AST_SNAPSHOT ──< TRANSFORMATION >── OPTIMIZATION_RULE
++```
++
++The implementation extends the report model with a `request_id`, explicit
++source and target dialect references, snapshot stages, and before/after
++snapshot references for each transformation. ASTs are stored as JSON, while
++the original and generated SQL are retained as text.
++
++The schema and seed data are defined in `database/schema.sql`. The initial
++student-owned rules are `constant_comparison_folding` and
++`boolean_identity_simplification`.
++
++Local runs leave persistence disabled unless `AUDIT_DB_ENABLED=true` is set.
++When persistence is enabled but MySQL is unavailable, conversion still
++succeeds and the API/UI reports a warning.
++
+ ## Run locally
+ 
+ 1. Install Python 3.10 or newer. Check it with:
+@@ -165,6 +187,23 @@ View its logs with `docker logs sql-dialect-converter`, stop it with
+ `docker stop sql-dialect-converter`, and remove it with
+ `docker rm sql-dialect-converter`.
+ 
++## Run with Docker Compose and MySQL
++
++Docker Compose starts the application and its MySQL audit database together:
++
++```bash
++docker compose up --build
++```
++
++Open <http://localhost:5000>. Stop the services with:
++
++```bash
++docker compose down
++```
++
++The MySQL data is stored in the `mysql-data` named volume. To remove the data
++as well, use `docker compose down -v`.
++
+ ## Run with Kubernetes and Minikube
+ 
+ This deployment uses a local Minikube cluster with the Docker driver and a
+@@ -195,6 +234,7 @@ terminal before continuing.
+    ```bash
+    kubectl apply -f k8s/sql-dialect-converter.yaml
+    kubectl rollout status deployment/sql-dialect-converter
++   kubectl rollout status deployment/sql-dialect-mysql
+    ```
+ 
+ 5. Open the application in a browser:
+@@ -215,5 +255,6 @@ Useful Kubernetes commands:
+ kubectl get pods
+ kubectl get services
+ kubectl logs deployment/sql-dialect-converter
++kubectl logs deployment/sql-dialect-mysql
+ kubectl delete -f k8s/sql-dialect-converter.yaml
+ ```
+diff --git a/app.py b/app.py
+index 10e39d64a023a5839d77ab4eae129350a98d4412..4430e39186a38d360e5127b96779229d0bd70226 100644
+--- a/app.py
++++ b/app.py
+@@ -23,6 +23,7 @@ def index():
+     target_dialect = "mysql"
+     converted_sql = ""
+     error = ""
++    warning = ""
+ 
+     if request.method == "POST":
+         source_sql = request.form.get("source_sql", "").strip()
+@@ -34,6 +35,7 @@ def index():
+         )
+         if result["success"]:
+             converted_sql = result["converted_sql"] or ""
++            warning = result["persistence_warning"] or ""
+         else:
+             error = result["error_message"] or "Unable to convert this SQL."
+ 
+@@ -45,6 +47,7 @@ def index():
+         target_dialect=target_dialect,
+         converted_sql=converted_sql,
+         error=error,
++        warning=warning,
+     )
+ 
+ 
+@@ -77,6 +80,11 @@ def api_convert():
+         converted_sql=result["converted_sql"],
+         source_dialect=payload["source_dialect"],
+         target_dialect=payload["target_dialect"],
++        **(
++            {"warning": result["persistence_warning"]}
++            if result["persistence_warning"]
++            else {}
++        ),
+     )
+ 
+ 
+@@ -112,6 +120,11 @@ def api_convert_debug():
+         source_dialect=payload["source_dialect"],
+         target_dialect=payload["target_dialect"],
+         trace=result["trace"],
++        **(
++            {"warning": result["persistence_warning"]}
++            if result["persistence_warning"]
++            else {}
++        ),
+     )
+ 
+ 
+diff --git a/database/schema.sql b/database/schema.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..ec6b448e0e4193d18d0c3dc173a6b0ffebed96e6
+--- /dev/null
++++ b/database/schema.sql
+@@ -0,0 +1,59 @@
++CREATE DATABASE IF NOT EXISTS sql_dialect_converter;
++
++USE sql_dialect_converter;
++
++CREATE TABLE IF NOT EXISTS dialect (
++    dialect_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
++    dialect_name VARCHAR(64) NOT NULL,
++    version VARCHAR(32) NULL,
++    supported_options JSON NOT NULL,
++    PRIMARY KEY (dialect_id),
++    UNIQUE KEY uq_dialect_name (dialect_name)
++) ENGINE = InnoDB;
++
++CREATE TABLE IF NOT EXISTS ast_snapshot (
++    snapshot_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
++    request_id CHAR(36) NOT NULL,
++    source_dialect_id BIGINT UNSIGNED NOT NULL,
++    target_dialect_id BIGINT UNSIGNED NOT NULL,
++    snapshot_stage VARCHAR(32) NOT NULL,
++    stage_number INT UNSIGNED NOT NULL,
++    raw_sql LONGTEXT NOT NULL,
++    generated_sql LONGTEXT NULL,
++    ast_json JSON NOT NULL,
++    node_count INT UNSIGNED NOT NULL,
++    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
++    PRIMARY KEY (snapshot_id),
++    UNIQUE KEY uq_snapshot_request_stage (request_id, stage_number),
++    KEY ix_snapshot_request (request_id),
++    CONSTRAINT fk_snapshot_source_dialect
++        FOREIGN KEY (source_dialect_id) REFERENCES dialect (dialect_id),
++    CONSTRAINT fk_snapshot_target_dialect
++        FOREIGN KEY (target_dialect_id) REFERENCES dialect (dialect_id)
++) ENGINE = InnoDB;
++
++CREATE TABLE IF NOT EXISTS optimization_rule (
++    rule_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
++    rule_name VARCHAR(128) NOT NULL,
++    pass_number INT UNSIGNED NOT NULL,
++    description TEXT NOT NULL,
++    is_active BOOLEAN NOT NULL DEFAULT TRUE,
++    PRIMARY KEY (rule_id),
++    UNIQUE KEY uq_optimization_rule_name (rule_name)
++) ENGINE = InnoDB;
++
++CREATE TABLE IF NOT EXISTS transformation (
++    snapshot_id BIGINT UNSIGNED NOT NULL,
++    step_number INT UNSIGNED NOT NULL,
++    rule_id BIGINT UNSIGNED NOT NULL,
++    output_snapshot_id BIGINT UNSIGNED NOT NULL,
++    ast_delta JSON NOT NULL,
++    exec_time_us BIGINT UNSIGNED NOT NULL,
++    PRIMARY KEY (snapshot_id, step_number),
++    CONSTRAINT fk_transformation_input_snapshot
++        FOREIGN KEY (snapshot_id) REFERENCES ast_snapshot (snapshot_id),
++    CONSTRAINT fk_transformation_output_snapshot
++        FOREIGN KEY (output_snapshot_id) REFERENCES ast_snapshot (snapshot_id),
++    CONSTRAINT fk_transformation_rule
++        FOREIGN KEY (rule_id) REFERENCES optimization_rule (rule_id)
++) ENGINE = InnoDB;
+diff --git a/docker-compose.yml b/docker-compose.yml
+new file mode 100644
+index 0000000000000000000000000000000000000000..a31fcb1367af4f6f9e1389f8d11e2a961414b27e
+--- /dev/null
++++ b/docker-compose.yml
+@@ -0,0 +1,34 @@
++services:
++  mysql:
++    image: mysql:8.4
++    environment:
++      MYSQL_ROOT_PASSWORD: sqlglot-root
++      MYSQL_DATABASE: sql_dialect_converter
++      MYSQL_USER: sqlglot
++      MYSQL_PASSWORD: sqlglot
++    volumes:
++      - mysql-data:/var/lib/mysql
++      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
++    healthcheck:
++      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
++      interval: 5s
++      timeout: 5s
++      retries: 20
++
++  app:
++    build: .
++    ports:
++      - "5000:5000"
++    environment:
++      AUDIT_DB_ENABLED: "true"
++      MYSQL_HOST: mysql
++      MYSQL_PORT: "3306"
++      MYSQL_DATABASE: sql_dialect_converter
++      MYSQL_USER: sqlglot
++      MYSQL_PASSWORD: sqlglot
++    depends_on:
++      mysql:
++        condition: service_healthy
++
++volumes:
++  mysql-data:
+diff --git a/k8s/sql-dialect-converter.yaml b/k8s/sql-dialect-converter.yaml
+index ea9813978ea09de3b866bce426670a636272c495..0cc84ef69629a709642ced566ffa4efbe2f74524 100644
+--- a/k8s/sql-dialect-converter.yaml
++++ b/k8s/sql-dialect-converter.yaml
+@@ -21,6 +21,28 @@ spec:
+           ports:
+             - containerPort: 5000
+               name: http
++          env:
++            - name: AUDIT_DB_ENABLED
++              value: "true"
++            - name: MYSQL_HOST
++              value: sql-dialect-mysql
++            - name: MYSQL_PORT
++              value: "3306"
++            - name: MYSQL_DATABASE
++              valueFrom:
++                secretKeyRef:
++                  name: sql-dialect-mysql
++                  key: MYSQL_DATABASE
++            - name: MYSQL_USER
++              valueFrom:
++                secretKeyRef:
++                  name: sql-dialect-mysql
++                  key: MYSQL_USER
++            - name: MYSQL_PASSWORD
++              valueFrom:
++                secretKeyRef:
++                  name: sql-dialect-mysql
++                  key: MYSQL_PASSWORD
+           readinessProbe:
+             httpGet:
+               path: /
+@@ -48,3 +70,140 @@ spec:
+     - name: http
+       port: 80
+       targetPort: http
++---
++apiVersion: v1
++kind: Secret
++metadata:
++  name: sql-dialect-mysql
++type: Opaque
++stringData:
++  MYSQL_DATABASE: sql_dialect_converter
++  MYSQL_USER: sqlglot
++  MYSQL_PASSWORD: sqlglot
++  MYSQL_ROOT_PASSWORD: sqlglot-root
++---
++apiVersion: v1
++kind: PersistentVolumeClaim
++metadata:
++  name: sql-dialect-mysql-data
++spec:
++  accessModes:
++    - ReadWriteOnce
++  resources:
++    requests:
++      storage: 1Gi
++---
++apiVersion: apps/v1
++kind: Deployment
++metadata:
++  name: sql-dialect-mysql
++  labels:
++    app: sql-dialect-mysql
++spec:
++  replicas: 1
++  selector:
++    matchLabels:
++      app: sql-dialect-mysql
++  template:
++    metadata:
++      labels:
++        app: sql-dialect-mysql
++    spec:
++      containers:
++        - name: mysql
++          image: mysql:8.4
++          ports:
++            - containerPort: 3306
++              name: mysql
++          envFrom:
++            - secretRef:
++                name: sql-dialect-mysql
++          volumeMounts:
++            - name: mysql-data
++              mountPath: /var/lib/mysql
++            - name: mysql-schema
++              mountPath: /docker-entrypoint-initdb.d/01-schema.sql
++              subPath: schema.sql
++          readinessProbe:
++            exec:
++              command:
++                - sh
++                - -c
++                - mysqladmin ping -h 127.0.0.1 -u root -p"$MYSQL_ROOT_PASSWORD" --silent
++            initialDelaySeconds: 10
++            periodSeconds: 5
++      volumes:
++        - name: mysql-data
++          persistentVolumeClaim:
++            claimName: sql-dialect-mysql-data
++        - name: mysql-schema
++          configMap:
++            name: sql-dialect-schema
++---
++apiVersion: v1
++kind: ConfigMap
++metadata:
++  name: sql-dialect-schema
++data:
++  schema.sql: |
++    CREATE DATABASE IF NOT EXISTS sql_dialect_converter;
++    USE sql_dialect_converter;
++    CREATE TABLE IF NOT EXISTS dialect (
++      dialect_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
++      dialect_name VARCHAR(64) NOT NULL,
++      version VARCHAR(32) NULL,
++      supported_options JSON NOT NULL,
++      PRIMARY KEY (dialect_id),
++      UNIQUE KEY uq_dialect_name (dialect_name)
++    ) ENGINE = InnoDB;
++    CREATE TABLE IF NOT EXISTS ast_snapshot (
++      snapshot_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
++      request_id CHAR(36) NOT NULL,
++      source_dialect_id BIGINT UNSIGNED NOT NULL,
++      target_dialect_id BIGINT UNSIGNED NOT NULL,
++      snapshot_stage VARCHAR(32) NOT NULL,
++      stage_number INT UNSIGNED NOT NULL,
++      raw_sql LONGTEXT NOT NULL,
++      generated_sql LONGTEXT NULL,
++      ast_json JSON NOT NULL,
++      node_count INT UNSIGNED NOT NULL,
++      created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
++      PRIMARY KEY (snapshot_id),
++      UNIQUE KEY uq_snapshot_request_stage (request_id, stage_number),
++      KEY ix_snapshot_request (request_id),
++      FOREIGN KEY (source_dialect_id) REFERENCES dialect (dialect_id),
++      FOREIGN KEY (target_dialect_id) REFERENCES dialect (dialect_id)
++    ) ENGINE = InnoDB;
++    CREATE TABLE IF NOT EXISTS optimization_rule (
++      rule_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
++      rule_name VARCHAR(128) NOT NULL,
++      pass_number INT UNSIGNED NOT NULL,
++      description TEXT NOT NULL,
++      is_active BOOLEAN NOT NULL DEFAULT TRUE,
++      PRIMARY KEY (rule_id),
++      UNIQUE KEY uq_optimization_rule_name (rule_name)
++    ) ENGINE = InnoDB;
++    CREATE TABLE IF NOT EXISTS transformation (
++      snapshot_id BIGINT UNSIGNED NOT NULL,
++      step_number INT UNSIGNED NOT NULL,
++      rule_id BIGINT UNSIGNED NOT NULL,
++      output_snapshot_id BIGINT UNSIGNED NOT NULL,
++      ast_delta JSON NOT NULL,
++      exec_time_us BIGINT UNSIGNED NOT NULL,
++      PRIMARY KEY (snapshot_id, step_number),
++      FOREIGN KEY (snapshot_id) REFERENCES ast_snapshot (snapshot_id),
++      FOREIGN KEY (output_snapshot_id) REFERENCES ast_snapshot (snapshot_id),
++      FOREIGN KEY (rule_id) REFERENCES optimization_rule (rule_id)
++    ) ENGINE = InnoDB;
++---
++apiVersion: v1
++kind: Service
++metadata:
++  name: sql-dialect-mysql
++spec:
++  selector:
++    app: sql-dialect-mysql
++  ports:
++    - name: mysql
++      port: 3306
++      targetPort: mysql
+diff --git a/persistence.py b/persistence.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..62ef250bb06e5132398a97cc51c12ca3c37edebd
+--- /dev/null
++++ b/persistence.py
+@@ -0,0 +1,185 @@
++"""Optional MySQL persistence for transpilation audit records."""
++
++from __future__ import annotations
++
++import json
++import os
++from pathlib import Path
++from typing import Any
++
++from transpilation_pipeline import (
++    RuleApplication,
++    TranspilationTrace,
++)
++
++try:
++    import pymysql
++except ImportError:  # pragma: no cover - exercised in minimal local installs
++    pymysql = None
++
++
++class AuditPersistenceError(RuntimeError):
++    """Raised when a trace cannot be written to MySQL."""
++
++
++class MySQLAuditStore:
++    """Persist conversion traces using the four entities from the report."""
++
++    DEFAULT_DIALECTS = {
++        "oracle": {"version": None, "supported_options": ["nvl", "oracle_dates"]},
++        "mysql": {"version": None, "supported_options": ["ifnull", "backticks"]},
++        "postgres": {
++            "version": None,
++            "supported_options": ["current_date", "double_quoted_identifiers"],
++        },
++    }
++
++    def __init__(self, connection_factory: Any = None, enabled: bool | None = None) -> None:
++        self._connection_factory = connection_factory
++        self.enabled = self._resolve_enabled(enabled)
++
++    def _resolve_enabled(self, enabled: bool | None) -> bool:
++        if enabled is not None:
++            return enabled
++        return os.getenv("AUDIT_DB_ENABLED", "false").lower() in {"1", "true", "yes"}
++
++    @classmethod
++    def from_env(cls) -> "MySQLAuditStore":
++        return cls()
++
++    def persist(self, trace: TranspilationTrace) -> None:
++        if not self.enabled:
++            return
++        if pymysql is None and self._connection_factory is None:
++            raise AuditPersistenceError("PyMySQL is not installed.")
++
++        connection = None
++        try:
++            connection = self._connect()
++            with connection.cursor() as cursor:
++                self._ensure_seed_data(cursor)
++                dialect_ids = self._dialect_ids(cursor)
++                rule_ids = self._rule_ids(cursor)
++                snapshot_ids = self._insert_snapshots(cursor, trace, dialect_ids)
++                self._insert_transformations(cursor, trace, snapshot_ids, rule_ids)
++            connection.commit()
++        except Exception as exc:
++            if connection is not None:
++                connection.rollback()
++            if isinstance(exc, AuditPersistenceError):
++                raise
++            raise AuditPersistenceError(str(exc)) from exc
++        finally:
++            if connection is not None:
++                connection.close()
++
++    def _connect(self) -> Any:
++        if self._connection_factory is not None:
++            return self._connection_factory()
++        return pymysql.connect(
++            host=os.getenv("MYSQL_HOST", "127.0.0.1"),
++            port=int(os.getenv("MYSQL_PORT", "3306")),
++            user=os.getenv("MYSQL_USER", "sqlglot"),
++            password=os.getenv("MYSQL_PASSWORD", "sqlglot"),
++            database=os.getenv("MYSQL_DATABASE", "sql_dialect_converter"),
++            charset="utf8mb4",
++            autocommit=False,
++        )
++
++    def _ensure_seed_data(self, cursor: Any) -> None:
++        schema_path = Path(__file__).parent / "database" / "schema.sql"
++        schema = schema_path.read_text(encoding="utf-8")
++        for statement in schema.split(";"):
++            statement = statement.strip()
++            if statement and not statement.upper().startswith(("CREATE DATABASE", "USE ")):
++                cursor.execute(statement)
++
++        for name, details in self.DEFAULT_DIALECTS.items():
++            cursor.execute(
++                """
++                INSERT INTO dialect (dialect_name, version, supported_options)
++                VALUES (%s, %s, %s)
++                ON DUPLICATE KEY UPDATE
++                    version = VALUES(version),
++                    supported_options = VALUES(supported_options)
++                """,
++                (name, details["version"], json.dumps(details["supported_options"])),
++            )
++
++        for rule in TranspilationTrace.rule_definitions():
++            cursor.execute(
++                """
++                INSERT INTO optimization_rule
++                    (rule_name, pass_number, description, is_active)
++                VALUES (%s, %s, %s, TRUE)
++                ON DUPLICATE KEY UPDATE
++                    pass_number = VALUES(pass_number),
++                    description = VALUES(description),
++                    is_active = TRUE
++                """,
++                (rule.name, rule.pass_number, rule.description),
++            )
++
++    def _dialect_ids(self, cursor: Any) -> dict[str, int]:
++        cursor.execute("SELECT dialect_id, dialect_name FROM dialect")
++        return {name: int(identifier) for identifier, name in cursor.fetchall()}
++
++    def _rule_ids(self, cursor: Any) -> dict[str, int]:
++        cursor.execute("SELECT rule_id, rule_name FROM optimization_rule")
++        return {name: int(identifier) for identifier, name in cursor.fetchall()}
++
++    def _insert_snapshots(
++        self,
++        cursor: Any,
++        trace: TranspilationTrace,
++        dialect_ids: dict[str, int],
++    ) -> dict[int, int]:
++        snapshot_ids: dict[int, int] = {}
++        for snapshot in trace.snapshots:
++            cursor.execute(
++                """
++                INSERT INTO ast_snapshot
++                    (request_id, source_dialect_id, target_dialect_id,
++                     snapshot_stage, stage_number, raw_sql, generated_sql,
++                     ast_json, node_count)
++                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
++                """,
++                (
++                    trace.request_id,
++                    dialect_ids[trace.source_dialect],
++                    dialect_ids[trace.target_dialect],
++                    snapshot.stage,
++                    snapshot.stage_number,
++                    trace.raw_sql,
++                    snapshot.generated_sql,
++                    json.dumps(snapshot.ast_json),
++                    snapshot.node_count,
++                ),
++            )
++            snapshot_ids[snapshot.stage_number] = int(cursor.lastrowid)
++        return snapshot_ids
++
++    def _insert_transformations(
++        self,
++        cursor: Any,
++        trace: TranspilationTrace,
++        snapshot_ids: dict[int, int],
++        rule_ids: dict[str, int],
++    ) -> None:
++        for transformation in trace.transformations:
++            cursor.execute(
++                """
++                INSERT INTO transformation
++                    (snapshot_id, step_number, rule_id, output_snapshot_id,
++                     ast_delta, exec_time_us)
++                VALUES (%s, %s, %s, %s, %s, %s)
++                """,
++                (
++                    snapshot_ids[transformation.input_stage_number],
++                    transformation.step_number,
++                    rule_ids[transformation.rule_name],
++                    snapshot_ids[transformation.output_stage_number],
++                    json.dumps(transformation.ast_delta),
++                    transformation.exec_time_us,
++                ),
++            )
+diff --git a/requirements.txt b/requirements.txt
+index d907d926312dc60d78b5dfa1921423caae96d5ed..4d259b5f44bc14e5beaffa560c193d6b2d574638 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,2 +1,3 @@
+ Flask==3.1.0
+ gunicorn==23.0.0
++PyMySQL==1.1.1
+diff --git a/static/style.css b/static/style.css
+index e007d4636e3080ae69f6df13b1289229eab069fb..52dcaddf4f05f43f210ef5a2ae8219e66d145395 100644
+--- a/static/style.css
++++ b/static/style.css
+@@ -52,6 +52,7 @@ button {
+ 
+ button:hover { background: #0f538a; }
+ .error { padding: .75rem; color: #9f1d1d; background: #fff0f0; border-radius: 5px; }
++.warning { padding: .75rem; color: #765400; background: #fff8db; border-radius: 5px; }
+ 
+ @media (max-width: 560px) {
+   .converter { padding: 1.25rem; }
+diff --git a/templates/index.html b/templates/index.html
+index 39afbd431378938ad7ab9926f8561c6c2443414e..c188984bbb6f31c896caf561ede6cd97f5fd261b 100644
+--- a/templates/index.html
++++ b/templates/index.html
+@@ -44,6 +44,10 @@
+       <p class="error" role="alert">{{ error }}</p>
+       {% endif %}
+ 
++      {% if warning %}
++      <p class="warning" role="status">{{ warning }}</p>
++      {% endif %}
++
+       <label for="converted_sql">
+         Converted SQL
+         <textarea id="converted_sql" rows="10" readonly placeholder="Converted query will appear here.">{{ converted_sql }}</textarea>
+diff --git a/tests/test_app.py b/tests/test_app.py
+index 1bc2317da5d0533106faffdbb82b447243c36022..8c182fa569dc8b6ed6be9d07342d7ed70e6724b2 100644
+--- a/tests/test_app.py
++++ b/tests/test_app.py
+@@ -3,6 +3,7 @@ import unittest
+ import sqlglot
+ 
+ from app import app
++from persistence import AuditPersistenceError
+ from transpilation_pipeline import TranspilationPipeline
+ from transpiler_wrapper import SQLTranspilationEngine
+ 
+@@ -248,6 +249,47 @@ class SQLTranspilationEngineTestCase(unittest.TestCase):
+         self.assertEqual(result["trace"]["parsed_ast"], result["trace"]["optimized_ast"])
+         self.assertIn("SELECT\n  1", result["converted_sql"])
+ 
++    def test_engine_records_rule_transformations(self):
++        result = self.engine.transpile_query(
++            "SELECT name FROM students WHERE age > 18 AND 1 = 1",
++            "mysql",
++            "postgres",
++            include_trace=True,
++        )
++
++        self.assertTrue(result["success"])
++        self.assertIn("WHERE\n  age > 18", result["converted_sql"])
++        self.assertEqual(
++            [item["rule_name"] for item in result["trace"]["transformations"]],
++            ["constant_comparison_folding", "boolean_identity_simplification"],
++        )
++        self.assertEqual(
++            [item["stage"] for item in result["trace"]["snapshots"]],
++            ["initial", "after_rule", "after_rule", "final"],
++        )
++
++    def test_engine_returns_warning_when_audit_persistence_fails(self):
++        class FailingStore:
++            def persist(self, trace):
++                raise AuditPersistenceError("database unavailable")
++
++        engine = SQLTranspilationEngine(audit_store=FailingStore())
++        result = engine.transpile_query("SELECT 1", "mysql", "postgres")
++
++        self.assertTrue(result["success"])
++        self.assertIn("audit persistence failed", result["persistence_warning"])
++
++
++class DatabaseSchemaTestCase(unittest.TestCase):
++    def test_schema_defines_report_entities_and_links(self):
++        from pathlib import Path
++
++        schema = (Path(__file__).parents[1] / "database" / "schema.sql").read_text()
++        for table in ("dialect", "ast_snapshot", "optimization_rule", "transformation"):
++            self.assertIn(f"CREATE TABLE IF NOT EXISTS {table}", schema)
++        self.assertIn("output_snapshot_id", schema)
++        self.assertIn("fk_transformation_rule", schema)
++
+ 
+ class TranspilationPipelineTestCase(unittest.TestCase):
+     def test_pipeline_exposes_each_stage(self):
+diff --git a/transpilation_pipeline.py b/transpilation_pipeline.py
+index cb57ecb0c770e75ed36441768a7b53ef503e868e..eb08231f1b488bafe08a6663d4ba4c7f5b783f99 100644
+--- a/transpilation_pipeline.py
++++ b/transpilation_pipeline.py
+@@ -8,9 +8,12 @@ flows between stages.
+ from __future__ import annotations
+ 
+ from dataclasses import dataclass
++import time
+ from typing import Literal
++from uuid import uuid4
+ 
+ from sqlglot import parse
++from sqlglot import expressions as exp
+ from sqlglot.errors import ErrorLevel
+ from sqlglot.expressions import Expression
+ from sqlglot.optimizer import optimize as sqlglot_optimize
+@@ -27,6 +30,28 @@ class TranspilationPipelineError(Exception):
+         super().__init__(message)
+ 
+ 
++@dataclass(frozen=True)
++class RuleDefinition:
++    """Metadata and implementation for one student-owned optimization rule."""
++
++    name: str
++    pass_number: int
++    description: str
++    apply: object
++
++
++@dataclass(frozen=True)
++class RuleApplication:
++    """One rule that changed an AST program."""
++
++    rule_name: str
++    input_stage_number: int
++    output_stage_number: int
++    step_number: int
++    ast_delta: dict[str, object]
++    exec_time_us: int
++
++
+ @dataclass(frozen=True)
+ class ParsedProgram:
+     """The parser output before it is accepted as the pipeline AST."""
+@@ -41,22 +66,121 @@ class AstProgram:
+     statements: tuple[Expression, ...]
+ 
+ 
++@dataclass(frozen=True)
++class AstSnapshot:
++    """A serializable AST state captured during one conversion."""
++
++    stage: str
++    stage_number: int
++    ast_json: tuple[dict[str, object], ...]
++    node_count: int
++    generated_sql: str | None = None
++
++
+ @dataclass(frozen=True)
+ class TranspilationTrace:
+     """Human-readable stage snapshots used by tests and the debug API."""
+ 
++    request_id: str
++    raw_sql: str
++    source_dialect: str
++    target_dialect: str
+     parsed_ast: tuple[str, ...]
+     optimized_ast: tuple[str, ...]
+     generated_sql: str
++    snapshots: tuple[AstSnapshot, ...]
++    transformations: tuple[RuleApplication, ...]
++
++    @staticmethod
++    def rule_definitions() -> tuple[RuleDefinition, ...]:
++        return RULE_DEFINITIONS
+ 
+     def as_dict(self) -> dict[str, object]:
+         return {
++            "request_id": self.request_id,
++            "source_dialect": self.source_dialect,
++            "target_dialect": self.target_dialect,
+             "parsed_ast": list(self.parsed_ast),
+             "optimized_ast": list(self.optimized_ast),
+             "generated_sql": self.generated_sql,
++            "snapshots": [
++                {
++                    "stage": snapshot.stage,
++                    "stage_number": snapshot.stage_number,
++                    "ast_json": list(snapshot.ast_json),
++                    "node_count": snapshot.node_count,
++                    "generated_sql": snapshot.generated_sql,
++                }
++                for snapshot in self.snapshots
++            ],
++            "transformations": [
++                {
++                    "rule_name": transformation.rule_name,
++                    "input_stage_number": transformation.input_stage_number,
++                    "output_stage_number": transformation.output_stage_number,
++                    "step_number": transformation.step_number,
++                    "ast_delta": transformation.ast_delta,
++                    "exec_time_us": transformation.exec_time_us,
++                }
++                for transformation in self.transformations
++            ],
+         }
+ 
+ 
++def _program_dump(program: AstProgram) -> tuple[dict[str, object], ...]:
++    return tuple(statement.dump() for statement in program.statements)
++
++
++def _node_count(program: AstProgram) -> int:
++    return sum(1 for statement in program.statements for _ in statement.walk())
++
++
++def _replace_numeric_comparisons(expression: Expression) -> Expression:
++    if not isinstance(expression, exp.EQ):
++        return expression
++    left = expression.this
++    right = expression.expression
++    if not isinstance(left, exp.Literal) or not isinstance(right, exp.Literal):
++        return expression
++    if left.is_string or right.is_string or not left.is_number or not right.is_number:
++        return expression
++    return exp.Boolean(this=left.to_py() == right.to_py())
++
++
++def _remove_boolean_identities(expression: Expression) -> Expression:
++    if not isinstance(expression, (exp.And, exp.Or)):
++        return expression
++    left = expression.this
++    right = expression.expression
++    if isinstance(right, exp.Boolean):
++        if isinstance(expression, exp.And) and right.this:
++            return left
++        if isinstance(expression, exp.Or) and not right.this:
++            return left
++    if isinstance(left, exp.Boolean):
++        if isinstance(expression, exp.And) and left.this:
++            return right
++        if isinstance(expression, exp.Or) and not left.this:
++            return right
++    return expression
++
++
++RULE_DEFINITIONS = (
++    RuleDefinition(
++        name="constant_comparison_folding",
++        pass_number=1,
++        description="Folds equality comparisons between numeric literals.",
++        apply=_replace_numeric_comparisons,
++    ),
++    RuleDefinition(
++        name="boolean_identity_simplification",
++        pass_number=2,
++        description="Removes AND TRUE and OR FALSE identity predicates.",
++        apply=_remove_boolean_identities,
++    ),
++)
++
++
+ class TranspilationPipeline:
+     """Run SQL through explicit parse, AST, optimize, and generate stages."""
+ 
+@@ -83,18 +207,16 @@ class TranspilationPipeline:
+ 
+     def optimize(self, ast: AstProgram, target_dialect: str) -> AstProgram:
+         try:
+-            # Calling SQLGlot's optimizer with no rules gives us a stable,
+-            # explicit optimization boundary without changing the existing
+-            # converter's output. Future lessons can add one rule at a time.
+-            optimized = tuple(
+-                sqlglot_optimize(
+-                    statement,
+-                    dialect=target_dialect,
+-                    rules=(),
++            return AstProgram(
++                tuple(
++                    sqlglot_optimize(
++                        statement,
++                        dialect=target_dialect,
++                        rules=(),
++                    )
++                    for statement in ast.statements
+                 )
+-                for statement in ast.statements
+             )
+-            return AstProgram(optimized)
+         except Exception as exc:
+             raise TranspilationPipelineError("optimize", str(exc)) from exc
+ 
+@@ -116,12 +238,69 @@ class TranspilationPipeline:
+         parsed = self.parse(query, source_dialect)
+         ast = self.build_ast(parsed)
+         optimized = self.optimize(ast, target_dialect)
+-        generated_sql = self.generate(optimized, target_dialect)
++        snapshots = [
++            AstSnapshot(
++                stage="initial",
++                stage_number=0,
++                ast_json=_program_dump(optimized),
++                node_count=_node_count(optimized),
++            )
++        ]
++        transformations: list[RuleApplication] = []
++        current = optimized
++        for definition in RULE_DEFINITIONS:
++            started = time.perf_counter_ns()
++            next_program = AstProgram(
++                tuple(
++                    statement.transform(definition.apply, copy=True)
++                    for statement in current.statements
++                )
++            )
++            elapsed_us = max(1, (time.perf_counter_ns() - started) // 1_000)
++            before_dump = _program_dump(current)
++            after_dump = _program_dump(next_program)
++            if before_dump == after_dump:
++                continue
++            output_stage_number = len(snapshots)
++            snapshots.append(
++                AstSnapshot(
++                    stage="after_rule",
++                    stage_number=output_stage_number,
++                    ast_json=after_dump,
++                    node_count=_node_count(next_program),
++                )
++            )
++            transformations.append(
++                RuleApplication(
++                    rule_name=definition.name,
++                    input_stage_number=output_stage_number - 1,
++                    output_stage_number=output_stage_number,
++                    step_number=len(transformations) + 1,
++                    ast_delta={"before": before_dump, "after": after_dump},
++                    exec_time_us=elapsed_us,
++                )
++            )
++            current = next_program
++
++        generated_sql = self.generate(current, target_dialect)
++        snapshots.append(
++            AstSnapshot(
++                stage="final",
++                stage_number=len(snapshots),
++                ast_json=_program_dump(current),
++                node_count=_node_count(current),
++                generated_sql=generated_sql,
++            )
++        )
+ 
+         return generated_sql, TranspilationTrace(
++            request_id=str(uuid4()),
++            raw_sql=query,
++            source_dialect=source_dialect,
++            target_dialect=target_dialect,
+             parsed_ast=tuple(repr(statement) for statement in ast.statements),
+-            optimized_ast=tuple(
+-                repr(statement) for statement in optimized.statements
+-            ),
++            optimized_ast=tuple(repr(statement) for statement in current.statements),
+             generated_sql=generated_sql,
++            snapshots=tuple(snapshots),
++            transformations=tuple(transformations),
+         )
+diff --git a/transpiler_wrapper.py b/transpiler_wrapper.py
+index 8699483072a0d3e822ab7d3ff880c91741d46813..5c641ddf054fae9f1f22bb9fbacf2e3690d7e742 100644
+--- a/transpiler_wrapper.py
++++ b/transpiler_wrapper.py
+@@ -6,6 +6,7 @@ from typing import Literal, TypedDict
+ 
+ from sqlglot.errors import ParseError, SqlglotError, UnsupportedError
+ 
++from persistence import AuditPersistenceError, MySQLAuditStore
+ from transpilation_pipeline import (
+     TranspilationPipeline,
+     TranspilationPipelineError,
+@@ -24,15 +25,17 @@ class SQLTranspilationResult(TypedDict):
+     error_category: ErrorCategory | None
+     error_stage: str | None
+     trace: dict[str, object] | None
++    persistence_warning: str | None
+ 
+ 
+ class SQLTranspilationEngine:
+     """Validates and converts SQL among the application's supported dialects."""
+ 
+-    def __init__(self) -> None:
++    def __init__(self, audit_store: MySQLAuditStore | None = None) -> None:
+         """Configure the sqlglot dialect identifiers accepted by this engine."""
+         self.supported_dialects = frozenset({"mysql", "postgres", "oracle"})
+         self.pipeline = TranspilationPipeline()
++        self.audit_store = audit_store or MySQLAuditStore.from_env()
+ 
+     def transpile_query(
+         self,
+@@ -53,6 +56,7 @@ class SQLTranspilationEngine:
+                 "error_category": "validation",
+                 "error_stage": None,
+                 "trace": None,
++                "persistence_warning": None,
+             }
+ 
+         try:
+@@ -67,6 +71,7 @@ class SQLTranspilationEngine:
+                 "error_category": "conversion",
+                 "error_stage": exc.stage,
+                 "trace": None,
++                "persistence_warning": None,
+             }
+         except (ParseError, UnsupportedError, SqlglotError, ValueError) as exc:
+             return {
+@@ -76,6 +81,7 @@ class SQLTranspilationEngine:
+                 "error_category": "conversion",
+                 "error_stage": None,
+                 "trace": None,
++                "persistence_warning": None,
+             }
+         except Exception:
+             return {
+@@ -85,8 +91,15 @@ class SQLTranspilationEngine:
+                 "error_category": "internal",
+                 "error_stage": None,
+                 "trace": None,
++                "persistence_warning": None,
+             }
+ 
++        persistence_warning = None
++        try:
++            self.audit_store.persist(trace)
++        except AuditPersistenceError as exc:
++            persistence_warning = f"Conversion succeeded, but audit persistence failed: {exc}"
++
+         return {
+             "success": True,
+             "converted_sql": converted_sql,
+@@ -94,6 +107,7 @@ class SQLTranspilationEngine:
+             "error_category": None,
+             "error_stage": None,
+             "trace": trace.as_dict() if include_trace else None,
++            "persistence_warning": persistence_warning,
+         }
+ 
+     def _validate_request(

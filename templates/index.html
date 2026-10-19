@@ -44,6 +44,10 @@
       <p class="error" role="alert">{{ error }}</p>
       {% endif %}
 
+      {% if warning %}
+      <p class="warning" role="status">{{ warning }}</p>
+      {% endif %}
+
       <label for="converted_sql">
         Converted SQL
         <textarea id="converted_sql" rows="10" readonly placeholder="Converted query will appear here.">{{ converted_sql }}</textarea>

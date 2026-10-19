@@ -3,6 +3,7 @@ import unittest
 import sqlglot
 
 from app import app
+from persistence import AuditPersistenceError
 from transpilation_pipeline import TranspilationPipeline
 from transpiler_wrapper import SQLTranspilationEngine
 
@@ -247,6 +248,47 @@ class SQLTranspilationEngineTestCase(unittest.TestCase):
         self.assertEqual(len(result["trace"]["parsed_ast"]), 2)
         self.assertEqual(result["trace"]["parsed_ast"], result["trace"]["optimized_ast"])
         self.assertIn("SELECT\n  1", result["converted_sql"])
+
+    def test_engine_records_rule_transformations(self):
+        result = self.engine.transpile_query(
+            "SELECT name FROM students WHERE age > 18 AND 1 = 1",
+            "mysql",
+            "postgres",
+            include_trace=True,
+        )
+
+        self.assertTrue(result["success"])
+        self.assertIn("WHERE\n  age > 18", result["converted_sql"])
+        self.assertEqual(
+            [item["rule_name"] for item in result["trace"]["transformations"]],
+            ["constant_comparison_folding", "boolean_identity_simplification"],
+        )
+        self.assertEqual(
+            [item["stage"] for item in result["trace"]["snapshots"]],
+            ["initial", "after_rule", "after_rule", "final"],
+        )
+
+    def test_engine_returns_warning_when_audit_persistence_fails(self):
+        class FailingStore:
+            def persist(self, trace):
+                raise AuditPersistenceError("database unavailable")
+
+        engine = SQLTranspilationEngine(audit_store=FailingStore())
+        result = engine.transpile_query("SELECT 1", "mysql", "postgres")
+
+        self.assertTrue(result["success"])
+        self.assertIn("audit persistence failed", result["persistence_warning"])
+
+
+class DatabaseSchemaTestCase(unittest.TestCase):
+    def test_schema_defines_report_entities_and_links(self):
+        from pathlib import Path
+
+        schema = (Path(__file__).parents[1] / "database" / "schema.sql").read_text()
+        for table in ("dialect", "ast_snapshot", "optimization_rule", "transformation"):
+            self.assertIn(f"CREATE TABLE IF NOT EXISTS {table}", schema)
+        self.assertIn("output_snapshot_id", schema)
+        self.assertIn("fk_transformation_rule", schema)
 
 
 class TranspilationPipelineTestCase(unittest.TestCase):
