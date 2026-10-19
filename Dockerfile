@@ -10,6 +10,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py .
 COPY transpiler_wrapper.py .
+COPY transpilation_pipeline.py .
 COPY sqlglot ./sqlglot
 COPY templates ./templates
 COPY static ./static
