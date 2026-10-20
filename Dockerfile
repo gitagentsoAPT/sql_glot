@@ -9,6 +9,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py .
+COPY persistence.py .
 COPY transpiler_wrapper.py .
 COPY transpilation_pipeline.py .
 COPY database ./database
